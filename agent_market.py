@@ -7,17 +7,22 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 # Import dinâmico para compatibilidade entre versões do LangChain
 try:
-    from langchain.agents import create_react_agent, AgentExecutor  # LangChain >= 0.2
-    _LC_AGENT_API = "react"
+    from langchain.agents import create_agent  # LangChain 1.0+
+    _LC_AGENT_API = "create_agent"
 except Exception:  # noqa: E722
-    create_react_agent = None  # type: ignore
-    AgentExecutor = None  # type: ignore
+    create_agent = None  # type: ignore
     try:
-        from langchain.agents import initialize_agent  # LangChain 0.0.x/0.1.x
-        _LC_AGENT_API = "initialize"
+        from langchain.agents import create_react_agent, AgentExecutor  # LangChain 0.2.x
+        _LC_AGENT_API = "react"
     except Exception:  # noqa: E722
-        initialize_agent = None  # type: ignore
-        _LC_AGENT_API = None
+        create_react_agent = None  # type: ignore
+        AgentExecutor = None  # type: ignore
+        try:
+            from langchain.agents import initialize_agent  # LangChain 0.0.x/0.1.x
+            _LC_AGENT_API = "initialize"
+        except Exception:  # noqa: E722
+            initialize_agent = None  # type: ignore
+            _LC_AGENT_API = None
 # Import compatível de Tool entre versões do LangChain
 try:
     from langchain_core.tools import Tool  # LangChain 0.2+
@@ -140,7 +145,45 @@ Comece agora a análise.
 """
     
     # Construir agente compatível com a versão instalada do LangChain
-    if _LC_AGENT_API == "react":
+    print(f"🔍 Usando API do LangChain: {_LC_AGENT_API or 'fallback manual'}\n")
+    if _LC_AGENT_API == "create_agent":
+        # LangChain 1.0+: create_agent retorna um CompiledStateGraph diretamente executável
+        agent_graph = create_agent(
+            model=llm,
+            tools=tools,
+            debug=False,  # Desliga o debug do LangChain
+            system_prompt="Você é um analista de mercado especializado."
+        )
+        # Encapsular o graph em um wrapper para manter compatibilidade com invoke({"input": ...})
+        class AgentWrapper:
+            def __init__(self, graph, logger):
+                self.graph = graph
+                self.logger = logger
+            def invoke(self, input_dict):
+                self.logger.on_chain_start({}, input_dict)
+                try:
+                    # O create_agent retorna um StateGraph que aceita {"messages": [...]}
+                    from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+                    
+                    result = self.graph.invoke({"messages": [HumanMessage(content=input_dict["input"])]}, config={"recursion_limit": 50})
+                    
+                    # Extrair tool calls das mensagens para exibir TAO customizado
+                    messages = result.get("messages", [])
+                    for i, msg in enumerate(messages):
+                        if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                            for tool_call in msg.tool_calls:
+                                self.logger.on_tool_start({"name": tool_call.get("name", "unknown")}, str(tool_call.get("args", {})))
+                        
+                        elif isinstance(msg, ToolMessage):
+                            self.logger.on_tool_end(msg.content if isinstance(msg.content, str) else str(msg.content)[:500])
+                    
+                    self.logger.on_chain_end({"output": messages[-1].content if messages and hasattr(messages[-1], 'content') else str(result)})
+                    return {"output": messages[-1].content if messages and hasattr(messages[-1], 'content') else str(result)}
+                except Exception as e:
+                    self.logger.on_tool_error(e)
+                    raise
+        agent = AgentWrapper(agent_graph, TAOConsoleLogger())
+    elif _LC_AGENT_API == "react":
         react_agent = create_react_agent(llm=llm, tools=tools)
         agent = AgentExecutor(
             agent=react_agent,
@@ -164,6 +207,7 @@ Comece agora a análise.
         )
     else:
         # Fallback manual: orquestração simples com logs TAO
+        print("⚠️  Modo fallback manual ativado (API de agente não disponível)\n")
         logger = TAOConsoleLogger()
         logger.on_chain_start({}, {"input": prompt})
 

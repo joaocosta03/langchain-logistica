@@ -15,9 +15,9 @@ def main():
     try:
         # Caso de uso fixo (pode ser expandido para input do usuário)
         topic = "Blockchain em Logística"
-        start_rev = 100.0
+        start_rev = 90.0
         end_rev = 120.0
-        months = 6.0
+        months = 9.0
         
         # Construir consulta para roteamento
         user_query = f"Analisar o potencial de mercado da tecnologia {topic}"
