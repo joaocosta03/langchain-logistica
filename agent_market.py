@@ -5,9 +5,24 @@ import os
 import json
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import AgentType, initialize_agent
-from langchain.memory import ConversationBufferMemory
-from langchain.tools import Tool
+# Import dinâmico para compatibilidade entre versões do LangChain
+try:
+    from langchain.agents import create_react_agent, AgentExecutor  # LangChain >= 0.2
+    _LC_AGENT_API = "react"
+except Exception:  # noqa: E722
+    create_react_agent = None  # type: ignore
+    AgentExecutor = None  # type: ignore
+    try:
+        from langchain.agents import initialize_agent  # LangChain 0.0.x/0.1.x
+        _LC_AGENT_API = "initialize"
+    except Exception:  # noqa: E722
+        initialize_agent = None  # type: ignore
+        _LC_AGENT_API = None
+# Import compatível de Tool entre versões do LangChain
+try:
+    from langchain_core.tools import Tool  # LangChain 0.2+
+except Exception:  # noqa: E722
+    from langchain.tools import Tool  # Fallback para versões antigas
 
 from callbacks import TAOConsoleLogger
 from tools import web_search, calc_cagr, report_refine
@@ -43,7 +58,7 @@ def run_market_agent(topic: str, start_rev: float, end_rev: float, months: float
     
     # Instanciar o modelo Gemini
     llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-pro",
+        model="gemini-flash-lite-latest",
         temperature=0.2,
         max_output_tokens=1500,
         google_api_key=gemini_key
@@ -53,7 +68,7 @@ def run_market_agent(topic: str, start_rev: float, end_rev: float, months: float
     tools = [
         Tool(
             name="web_search",
-            func=lambda q: json.dumps(web_search(q, num=5), ensure_ascii=False, indent=2),
+            func=lambda q: json.dumps(web_search(q, num=5, time_period="m6"), ensure_ascii=False, indent=2),
             description=(
                 "Busca notícias, relatórios e informações recentes na web sobre um tema específico. "
                 "Use quando precisar encontrar fontes atualizadas sobre investimentos, crescimento, "
@@ -84,29 +99,13 @@ def run_market_agent(topic: str, start_rev: float, end_rev: float, months: float
         )
     ]
     
-    # Memória simples
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    
-    # Inicializar agente
-    agent = initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        max_iterations=8,
-        early_stopping_method="generate",
-        memory=memory,
-        callbacks=[TAOConsoleLogger()],
-        handle_parsing_errors=True
-    )
-    
-    # Construir prompt detalhado
+    # Construir prompt detalhado (usado tanto pelo executor quanto no fallback manual)
     prompt = f"""
 Você é um analista de mercado especializado. Sua tarefa é produzir um relatório consolidado sobre o tema: "{topic}".
 
 INSTRUÇÕES OBRIGATÓRIAS:
 
-1. **Buscar Fontes**: Use a ferramenta web_search para encontrar notícias ou relatórios recentes (últimos 6-9 meses) sobre investimentos, crescimento ou desenvolvimentos relacionados a "{topic}".
+1. **Buscar Fontes (últimos 6 meses)**: Use a ferramenta web_search para encontrar notícias ou relatórios publicados nos ÚLTIMOS 6 MESES sobre investimentos, crescimento ou desenvolvimentos relacionados a "{topic}".
 
 2. **Selecionar 2 Fontes**: Do resultado da busca, selecione exatamente 2 fontes relevantes que mencionem investimentos, crescimento de mercado ou avanços tecnológicos.
 
@@ -139,6 +138,85 @@ INSTRUÇÕES OBRIGATÓRIAS:
 
 Comece agora a análise.
 """
+    
+    # Construir agente compatível com a versão instalada do LangChain
+    if _LC_AGENT_API == "react":
+        react_agent = create_react_agent(llm=llm, tools=tools)
+        agent = AgentExecutor(
+            agent=react_agent,
+            tools=tools,
+            verbose=True,
+            max_iterations=8,
+            early_stopping_method="generate",
+            callbacks=[TAOConsoleLogger()],
+            handle_parsing_errors=True
+        )
+    elif _LC_AGENT_API == "initialize":
+        agent = initialize_agent(
+            tools=tools,
+            llm=llm,
+            agent="zero-shot-react-description",
+            verbose=True,
+            max_iterations=8,
+            early_stopping_method="generate",
+            callbacks=[TAOConsoleLogger()],
+            handle_parsing_errors=True
+        )
+    else:
+        # Fallback manual: orquestração simples com logs TAO
+        logger = TAOConsoleLogger()
+        logger.on_chain_start({}, {"input": prompt})
+
+        # Action: web_search
+        logger.on_tool_start({"name": "web_search"}, topic)
+        try:
+            search_results = web_search(f"{topic} investimentos crescimento", num=5, time_period="m6")
+            logger.on_tool_end(json.dumps(search_results, ensure_ascii=False)[:500])
+        except Exception as e:
+            logger.on_tool_error(e)
+            raise
+
+        # Pedir ao LLM para escolher 2 fontes e resumir
+        selection_prompt = (
+            "Você recebeu resultados de busca em JSON. Selecione exatamente 2 fontes relevantes, "
+            "citando título, link e data, e produza um breve resumo de 2-3 frases para cada. "
+            "Se a data não estiver disponível, escreva 'data não informada'.\n\n"
+            f"RESULTADOS:\n{json.dumps(search_results, ensure_ascii=False, indent=2)}\n\n"
+            "Responda em JSON com o formato: {\"fontes\": [ {\"titulo\": ..., \"link\": ..., \"data\": ..., \"resumo\": ...}, {...} ]}"
+        )
+        selection = llm.invoke(selection_prompt)
+
+        # Action: calc_cagr
+        logger.on_tool_start({"name": "calc_cagr"}, json.dumps({"start": start_rev, "end": end_rev, "months": months}))
+        try:
+            cagr_value = calc_cagr(start=start_rev, end=end_rev, months=months)
+            logger.on_tool_end(str(cagr_value))
+        except Exception as e:
+            logger.on_tool_error(e)
+            raise
+
+        # Escrever relatório final com 4 parágrafos
+        try:
+            data = selection.content if hasattr(selection, "content") else str(selection)
+            final_prompt = (
+                "Com base nas duas fontes selecionadas (JSON a seguir) e no CAGR informado, "
+                "escreva um relatório em português (PT-BR) com EXATAMENTE 4 parágrafos: \n"
+                "Parágrafo 1: contexto geral do tema.\n"
+                "Parágrafo 2: apresente a primeira fonte (título, link, data) e um resumo.\n"
+                "Parágrafo 3: apresente a segunda fonte (título, link, data) e um resumo.\n"
+                "Parágrafo 4: análise de crescimento mencionando o CAGR em formato XX,XX% e conclusão.\n\n"
+                f"FONTES (JSON):\n{data}\n\n"
+                f"CAGR decimal: {cagr_value}. Converta para percentual com 2 casas."
+            )
+            report = llm.invoke(final_prompt)
+            text = report.content if hasattr(report, "content") else str(report)
+            text = report_refine(text)
+            logger.on_chain_end({"output": text})
+            return text
+        except Exception as e:
+            logger.on_tool_error(e)
+            raise
+    
     
     # Executar o agente
     try:

@@ -2,7 +2,11 @@
 Callbacks para rastreamento TAO (Thought/Action/Observation).
 """
 from typing import Any, Dict, List
-from langchain.callbacks.base import BaseCallbackHandler
+# Import compatível entre versões do LangChain
+try:
+    from langchain_core.callbacks.base import BaseCallbackHandler  # LangChain 0.2+
+except Exception:  # noqa: E722
+    from langchain.callbacks.base import BaseCallbackHandler  # Fallback versões antigas
 
 
 class TAOConsoleLogger(BaseCallbackHandler):

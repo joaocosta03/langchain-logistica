@@ -3,10 +3,11 @@ Ferramentas para o agente de análise de mercado.
 """
 import json
 from typing import Any
-from serpapi import GoogleSearch
+import os
+import requests
 
 
-def web_search(query: str, num: int = 5) -> list[dict[str, Any]]:
+def web_search(query: str, num: int = 5, time_period: str | None = None) -> list[dict[str, Any]]:
     """
     Busca notícias/relatórios usando SerpAPI.
     
@@ -17,19 +18,24 @@ def web_search(query: str, num: int = 5) -> list[dict[str, Any]]:
     Returns:
         Lista de dicionários com title, link, snippet, date
     """
-    import os
-    
     api_key = os.getenv("SERPAPI_API_KEY")
     if not api_key:
         raise ValueError("SERPAPI_API_KEY não encontrada. Configure no arquivo .env")
     
     try:
-        search = GoogleSearch({
+        params = {
+            "engine": "google",
             "q": query,
             "num": num,
-            "api_key": api_key
-        })
-        results = search.get_dict()
+            "api_key": api_key,
+        }
+        # Filtro temporal opcional (tbs=qdr:<time>)
+        if time_period:
+            params["tbs"] = f"qdr:{time_period}"
+
+        resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
+        resp.raise_for_status()
+        results = resp.json()
         
         # Normalizar retorno - extrair apenas campos essenciais
         organic_results = results.get("organic_results", [])
@@ -45,6 +51,8 @@ def web_search(query: str, num: int = 5) -> list[dict[str, Any]]:
         
         return normalized
     
+    except requests.HTTPError as e:
+        raise RuntimeError(f"Erro HTTP no SerpAPI: {e.response.status_code} {e.response.text[:200]}")
     except Exception as e:
         raise RuntimeError(f"Erro ao buscar no SerpAPI: {str(e)}")
 

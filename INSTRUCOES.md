@@ -59,9 +59,10 @@ python tests/test_calc_cagr.py
 ## 🎯 O que o Agente Faz
 
 1. **Busca** 2 notícias/relatórios sobre "Blockchain em Logística"
-2. **Extrai** títulos, links e datas das fontes
-3. **Calcula** CAGR: (120/100)^(12/6) - 1 ≈ 0.44 = 44%
-4. **Gera** relatório estruturado em 4 parágrafos:
+2. **Prioriza** resultados dos **últimos 6 meses** (filtro via SerpAPI + instrução no prompt)
+3. **Extrai** títulos, links e datas das fontes
+4. **Calcula** CAGR: (120/100)^(12/6) - 1 ≈ 0.44 = 44%
+5. **Gera** relatório estruturado em 4 parágrafos:
    - Parágrafo 1: Contexto geral
    - Parágrafo 2: Primeira fonte (título, link, data)
    - Parágrafo 3: Segunda fonte (título, link, data)
